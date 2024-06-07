@@ -1,20 +1,32 @@
 import logging
+import uvicorn
+import re
+import nltk
+import language_tool_python
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+#from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from huggingface_hub import HfApi, HfFolder
 from fastapi.staticfiles import StaticFiles
-import uvicorn
-import re
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+
+# Inicializar o corretor gramatical
+tool = language_tool_python.LanguageTool('en-US')
+
+# Carregar o modelo de parafraseamento
+paraphrase_tokenizer = AutoTokenizer.from_pretrained("prithivida/parrot_paraphraser_on_T5")
+paraphrase_model = AutoModelForSeq2SeqLM.from_pretrained("prithivida/parrot_paraphraser_on_T5")
+
+# Baixar o recurso 'punkt' da NLTK
+nltk.download('punkt')
 
 # Configuração de logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-
 
 class Mensagem(BaseModel):
     mensagem: str
@@ -50,8 +62,8 @@ HfFolder.save_token(token)
 
 # Carregar o modelo e o tokenizer pré-treinados
 try:
-    tokenizer = AutoTokenizer.from_pretrained("openai-community/gpt2")
-    model = AutoModelForCausalLM.from_pretrained("openai-community/gpt2")
+    tokenizer = AutoTokenizer.from_pretrained("mosaicml/mpt-30b", trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained("mosaicml/mpt-30b", trust_remote_code=True)
 except Exception as e:
     logging.error(f"Erro ao carregar o modelo: {e}")
     raise
@@ -59,14 +71,39 @@ except Exception as e:
 # Definir o token de preenchimento para ser o mesmo que o token de fim de sequência
 tokenizer.pad_token = tokenizer.eos_token
 
+def paraphrase(text):
+    inputs = paraphrase_tokenizer.encode_plus(text, return_tensors='pt')
+    outputs = paraphrase_model.generate(inputs['input_ids'], max_length=128, num_return_sequences=1, num_beams=5, early_stopping=True)
+    paraphrased_text = paraphrase_tokenizer.decode(outputs[0], skip_special_tokens=True)
+    return paraphrased_text
+
 def post_process(resposta):
-    # Remover nomes seguidos por dois pontos
-    resposta = re.sub(r'\b[A-Z][a-z]*: ', '', resposta)
+    # Dividir a resposta em sentenças
+    sentencas = nltk.sent_tokenize(resposta)
     
-    # Substituir repetições de palavras ou frases
-    resposta = re.sub(r'(\b\w+\b)( \1\b)+', r'\1', resposta)
+    # Remover nomes no início das sentenças e sentenças repetidas
+    sentencas_unicas = []
+    for sentenca in sentencas:
+        # Remover nomes no início da sentença
+        sentenca_sem_nome = re.sub(r'^[A-Za-z\'\-\s]*:', '', sentenca)
+        
+        # Verificar se a sentença (sem o nome) é repetida ou similar
+        if sentenca_sem_nome not in sentencas_unicas:
+            sentencas_unicas.append(sentenca_sem_nome)
     
-    return resposta.strip()
+    # Juntar as sentenças únicas de volta em uma única string
+    resposta = ' '.join(sentencas_unicas)
+    
+    # Remover possíveis duplicatas consecutivas de palavras ou frases
+    resposta = re.sub(r'\b(\w+)( \1\b)+', r'\1', resposta)
+    
+    # Correção gramatical e ortográfica
+    resposta_corrigida = tool.correct(resposta)
+    
+    # Parafrasear para melhorar a fluidez
+    resposta_final = paraphrase(resposta_corrigida)
+    
+    return resposta_final.strip()
 
 @app.post('/responder')
 async def responder(dados: Mensagem):
@@ -83,7 +120,7 @@ async def responder(dados: Mensagem):
             return_tensors='pt',
             padding='max_length',
             truncation=True,
-            max_length=50, 
+            max_length=150, 
             return_attention_mask=True
         )
         
@@ -96,8 +133,8 @@ async def responder(dados: Mensagem):
             max_new_tokens=40, 
             pad_token_id=tokenizer.eos_token_id,
             do_sample=True,
-            temperature=0.7,
-            top_p=0.9
+            temperature=0.7,  # Ajustar para gerar respostas mais variadas
+            top_p=0.85  # Ajustar para reduzir a repetição
         )
         
         logging.info(f"Outputs gerados: {outputs}")
@@ -106,7 +143,10 @@ async def responder(dados: Mensagem):
         resposta = tokenizer.decode(outputs[0], skip_special_tokens=True)
         resposta = resposta[len(mensagem_com_prefixo):].strip()
         
-        logging.info(f"Resposta gerada: {resposta}")
+        # Pós-processamento da resposta
+        resposta = post_process(resposta)
+        
+        logging.info(f"Resposta gerada e pós-processada: {resposta}")
         
         return JSONResponse(content={'resposta': resposta})
     except Exception as e:
