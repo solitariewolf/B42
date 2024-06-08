@@ -8,18 +8,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-#from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from huggingface_hub import HfApi, HfFolder
 from fastapi.staticfiles import StaticFiles
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+
+# Verificar se 'distutils' está disponível
+try:
+    import distutils
+except ImportError:
+    raise ImportError("O módulo 'distutils' não está disponível. Instale 'setuptools' para obter 'distutils'.")
 
 # Inicializar o corretor gramatical
 tool = language_tool_python.LanguageTool('en-US')
-
-# Carregar o modelo de parafraseamento
-paraphrase_tokenizer = AutoTokenizer.from_pretrained("prithivida/parrot_paraphraser_on_T5")
-paraphrase_model = AutoModelForSeq2SeqLM.from_pretrained("prithivida/parrot_paraphraser_on_T5")
 
 # Baixar o recurso 'punkt' da NLTK
 nltk.download('punkt')
@@ -62,8 +62,8 @@ HfFolder.save_token(token)
 
 # Carregar o modelo e o tokenizer pré-treinados
 try:
-    tokenizer = AutoTokenizer.from_pretrained("mosaicml/mpt-30b", trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained("mosaicml/mpt-30b", trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained("openai-community/gpt2")
+    model = AutoModelForCausalLM.from_pretrained("openai-community/gpt2")
 except Exception as e:
     logging.error(f"Erro ao carregar o modelo: {e}")
     raise
@@ -71,11 +71,8 @@ except Exception as e:
 # Definir o token de preenchimento para ser o mesmo que o token de fim de sequência
 tokenizer.pad_token = tokenizer.eos_token
 
-def paraphrase(text):
-    inputs = paraphrase_tokenizer.encode_plus(text, return_tensors='pt')
-    outputs = paraphrase_model.generate(inputs['input_ids'], max_length=128, num_return_sequences=1, num_beams=5, early_stopping=True)
-    paraphrased_text = paraphrase_tokenizer.decode(outputs[0], skip_special_tokens=True)
-    return paraphrased_text
+# Lista de palavras ou frases proibidas
+proibidas = ['palavra1', 'palavra2', 'frase inapropriada']
 
 def post_process(resposta):
     # Dividir a resposta em sentenças
@@ -100,10 +97,15 @@ def post_process(resposta):
     # Correção gramatical e ortográfica
     resposta_corrigida = tool.correct(resposta)
     
-    # Parafrasear para melhorar a fluidez
-    resposta_final = paraphrase(resposta_corrigida)
+    # Remover respostas incoerentes ou ofensivas
+    for proibida in proibidas:
+        if proibida in resposta_corrigida.lower():
+            resposta_corrigida = resposta_corrigida.replace(proibida, '[conteúdo removido]')
     
-    return resposta_final.strip()
+    # Remover espaços em branco excessivos
+    resposta_corrigida = ' '.join(resposta_corrigida.split())
+    
+    return resposta_corrigida.strip()
 
 @app.post('/responder')
 async def responder(dados: Mensagem):
